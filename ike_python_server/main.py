@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from typing import Optional
-from ike_python_server.database import query_db, Neo4jCredentials
+from ike_python_server.database import query_db, Neo4jCredentials, can_connect
 from ike_python_server.logger import logger
 import json
 import os
@@ -27,22 +28,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Load the Neo4j credentials from the environment
-neo4j_creds = Neo4jCredentials(
-    uri=os.getenv("NEO4J_URI"),
-    user=os.getenv("NEO4J_USERNAME"),
-    password=os.getenv("NEO4J_PASSWORD"),
-    database=os.getenv("NEO4J_DATABASE"),
-)
+# neo4j_creds = Neo4jCredentials(
+#     uri=os.getenv("NEO4J_URI"),
+#     username=os.getenv("NEO4J_USERNAME"),
+#     password=os.getenv("NEO4J_PASSWORD"),
+#     database=os.getenv("NEO4J_DATABASE"),
+# )
 
 
-@app.get("/")
-async def main():
-    return {"message": "Hello World"}
+@app.post("/validate")
+async def check_database_connection(creds: Neo4jCredentials):
+
+    success, msg = can_connect(creds)
+    if success:
+        return {"message": "Connection successful"}, 200
+    else:
+        return {"message": "Connection failed", "error": msg}, 400
 
 
-@app.get("/nodes/labels/")
-def get_node_labels() -> list[str]:
+@app.post("/nodes/labels/")
+def get_node_labels(creds: Neo4jCredentials) -> list[str]:
     """Return a list of Node labels from a specified Neo4j instance.
 
     Args:
@@ -55,7 +62,7 @@ def get_node_labels() -> list[str]:
     query = """
         call db.labels();
     """
-    response, _, _ = query_db(neo4j_creds, query)
+    response, _, _ = query_db(creds, query)
 
     logger.debug(f"get node labels response: {response}")
 
@@ -65,14 +72,10 @@ def get_node_labels() -> list[str]:
     return result
 
 
-@app.get("/nodes/")
-def get_nodes(labels: Optional[list[str]] = None):
-    #     query = """
-    #     MATCH (n)
-    #     RETURN head(labels(n)) as label, n.id as id
-    # """
+@app.post("/nodes/")
+def get_nodes(creds: Neo4jCredentials, labels: list[str] = []):
 
-    if labels is not None:
+    if labels is not None and len(labels) > 0:
         query = """
     MATCH (n)
     WHERE any(label IN labels(n) WHERE label IN $labels)
@@ -86,7 +89,7 @@ def get_nodes(labels: Optional[list[str]] = None):
     """
         params = {}
 
-    records, summary, key = query_db(neo4j_creds, query, params)
+    records, summary, key = query_db(creds, query, params)
 
     result = [
         {
@@ -106,8 +109,8 @@ def get_nodes(labels: Optional[list[str]] = None):
     return result
 
 
-@app.post("/nodes/")
-def create_node(node_data: dict):
+@app.post("/nodes/new")
+def create_node(creds: Neo4jCredentials, node_data: dict):
     # Process the node data and create a new node
     label = node_data["label"]
     id = node_data["id"]
@@ -119,15 +122,15 @@ def create_node(node_data: dict):
     params = {
         "id": id,
     }
-    records, summary, keys = query_db(neo4j_creds, query, params)
+    records, summary, keys = query_db(creds, query, params)
 
     logger.info(f"Add nodes summary: {summary}")
 
     return {"message": "New node created", "summary": summary}
 
 
-@app.get("/relationships/types/")
-def get_relationship_types() -> list[str]:
+@app.post("/relationships/types/")
+def get_relationship_types(creds: Neo4jCredentials) -> list[str]:
     """Return a list of Relationship types from a Neo4j instance.
 
     Args:
@@ -140,7 +143,7 @@ def get_relationship_types() -> list[str]:
     query = """
         call db.relationshipTypes();
     """
-    response, _, _ = query_db(neo4j_creds, query)
+    response, _, _ = query_db(creds, query)
 
     logger.debug(f"get relationships types response: {response}")
 
@@ -150,10 +153,14 @@ def get_relationship_types() -> list[str]:
     return result
 
 
-@app.get("/relationships/")
+@app.post("/relationships/")
 def get_relationships(
-    labels: Optional[list[str]] = None, types: Optional[list[str]] = None
+    creds: Neo4jCredentials,
+    labels: Optional[list[str]] = None,
+    types: Optional[list[str]] = None,
 ):
+
+    # TODO: Add label and type filtering
 
     # query = f"""
     # MATCH (n)-[r]->(n2)
@@ -172,9 +179,7 @@ def get_relationships(
     """
     params = {}
 
-    records, summary, keys = query_db(neo4j_creds, query, params)
-
-    # logger.debug(f"get relationship records: {records}")
+    records, summary, keys = query_db(creds, query, params)
 
     result = []
     for r in records:
@@ -201,8 +206,8 @@ def get_relationships(
     return result
 
 
-@app.post("/relationships/")
-def create_relationship(relationship_data: dict):
+@app.post("/relationships/new/")
+def create_relationship(creds: Neo4jCredentials, relationship_data: dict):
     # Process the relationship data and create a new relationship
 
     sid = relationship_data.source_id
@@ -213,6 +218,6 @@ def create_relationship(relationship_data: dict):
     RETURN r
     """
     params = {"sid": sid, "tid": tid}
-    records, summary, keys = query_db(neo4j_creds, query, params)
+    records, summary, keys = query_db(creds, query, params)
     logger.info(f"Add relationship summary: {summary}")
     return {"message": "New relationship created", "summary": summary}
