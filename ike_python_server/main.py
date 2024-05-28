@@ -159,24 +159,33 @@ def get_relationships(
     labels: Optional[list[str]] = None,
     types: Optional[list[str]] = None,
 ):
+    """Return a list of Relationships from a Neo4j instance.
 
-    # TODO: Add label and type filtering
+    Args:
+        creds (Neo4jCredential): Credentials object for Neo4j instance to get Relationships from.
+        labels (list[str], optional): List of Node labels to filter by. Defaults to [].
+        types (list[str], optional): List of Relationship types to filter by. Defaults to [].
 
-    # query = f"""
-    # MATCH (n)-[r]->(n2)
-    # RETURN n.id as source, type(r) as label, n2.id as target, type(r) as id
-    # """
-    # query = f"""
-    #     MATCH (n)-[r]->(n2)
-    #     WHERE any(label IN labels(n) WHERE label IN $labels) AND any(label IN labels(n2) WHERE label IN $labels) AND type(r) in $types
-    #     RETURN n, r, n2
-    # params = {"labels": labels, "types": types}
-
-    # """
-    query = f"""
-    MATCH (n)-[r]->(n2)
-    RETURN n, r, n2
+    Returns:
+        list[Relationship]: List of Relationships formatted for Cytoscape
     """
+
+    # Dynamically construct Cypher query dependent on optional Node Labels and Relationship Types
+    query = f"""
+    MATCH (n)-[r]->(n2);
+    """
+
+    # Add label filtering
+    if labels is not None and len(labels) > 0:
+        query += "WHERE any(label IN labels(n) WHERE label IN $labels), any(label IN labels(n2) WHERE label IN $labels)"
+        if types is not None and len(types) > 0:
+            query += ", type(r) in $types;"
+
+    elif types is not None and len(types) > 0:
+        query += "WHERE type(r) in $types;"
+
+    query += "RETURN n, r, n2;"
+
     params = {}
 
     records, summary, keys = query_db(creds, query, params)
