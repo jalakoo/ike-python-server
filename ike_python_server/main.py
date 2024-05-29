@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -7,7 +7,7 @@ from ike_python_server.logger import logger
 import json
 import os
 import logging
-
+from neo4j.graph import Node, Relationship
 
 logger.setLevel(logging.DEBUG)
 
@@ -29,15 +29,6 @@ app.add_middleware(
 )
 
 
-# Load the Neo4j credentials from the environment
-# neo4j_creds = Neo4jCredentials(
-#     uri=os.getenv("NEO4J_URI"),
-#     username=os.getenv("NEO4J_USERNAME"),
-#     password=os.getenv("NEO4J_PASSWORD"),
-#     database=os.getenv("NEO4J_DATABASE"),
-# )
-
-
 @app.post("/validate")
 async def check_database_connection(creds: Neo4jCredentials):
 
@@ -46,6 +37,55 @@ async def check_database_connection(creds: Neo4jCredentials):
         return {"message": "Connection successful"}, 200
     else:
         return {"message": "Connection failed", "error": msg}, 400
+
+
+@app.post("/schema/")
+def get_schema(creds: Neo4jCredentials):
+    """Return a data model for a specified Neo4j instance."""
+
+    query = """
+        call db.schema.visualization
+    """
+    records, _, _ = query_db(creds, query)
+
+    logger.debug(f"get data model records: {records}")
+
+    # A list of lists will be returned. Only one element will be returned
+    datamodel = records[0]
+
+    # First indexed list are all Nodes information
+    nodes = datamodel[0]
+
+    # Second indexed list are all Relationships information
+    relationships = datamodel[1]
+
+    converted_nodes = [
+        {
+            "data": {
+                "id": n.element_id,
+                "label": list(n.labels)[0],
+                "neo4j_data": n._properties,
+            }
+        }
+        for n in nodes
+    ]
+
+    converted_rels = [
+        {
+            "data": {
+                "source": r.start_node.element_id,
+                "target": r.end_node.element_id,
+                "id": f"{r.element_id}r",
+                "label": r.type,
+                "neo4j_data": r._properties,
+            }
+        }
+        for r in relationships
+    ]
+
+    converted_elements = converted_nodes + converted_rels
+    logger.info(f"Returning schema result: {converted_elements}")
+    return converted_elements
 
 
 @app.post("/nodes/labels/")
@@ -73,7 +113,26 @@ def get_node_labels(creds: Neo4jCredentials) -> list[str]:
 
 
 @app.post("/nodes/")
-def get_nodes(creds: Neo4jCredentials, labels: list[str] = []):
+# NOTE: For some reason Pydantic is not parsing payload data correctly, so using older data parsing method with limited validation.
+# async def get_nodes(
+#     creds: Neo4jCredentials,
+#     labels: Optional[list[str]] = None,
+# ):
+async def get_nodes(request: Request):
+
+    try:
+        # Attempt to parse the incoming JSON data
+        parsed_data = await request.json()
+    except json.JSONDecodeError as e:
+        # Log the raw data when a JSON decode error occurs
+        print(f"JSON decode error: {e}")
+        return {"message": "JSON decode error", "error": str(e)}, 400
+
+    labels = parsed_data["labels"] if "labels" in parsed_data else []
+    creds = Neo4jCredentials(**parsed_data["creds"])
+
+    # @app.post("/nodes/")
+    # def get_nodes(creds: Neo4jCredentials, labels: list[str] = []):
 
     if labels is not None and len(labels) > 0:
         query = """
@@ -96,7 +155,7 @@ def get_nodes(creds: Neo4jCredentials, labels: list[str] = []):
             "data": {
                 "id": r.values()[0]._element_id,
                 "label": list(r.values()[0]._labels)[0],
-                "node_data": r.data(),
+                "neo4j_data": r.data()["n"],
             }
         }
         for r in records
@@ -154,11 +213,13 @@ def get_relationship_types(creds: Neo4jCredentials) -> list[str]:
 
 
 @app.post("/relationships/")
-def get_relationships(
-    creds: Neo4jCredentials,
-    labels: Optional[list[str]] = None,
-    types: Optional[list[str]] = None,
-):
+# NOTE: For some reason this doesn't parse correctly
+# async def get_relationships(
+#     creds: Neo4jCredentials,
+#     labels: Optional[list[str]] = None,
+#     types: Optional[list[str]] = None,
+# ):
+async def get_relationships(request: Request):
     """Return a list of Relationships from a Neo4j instance.
 
     Args:
@@ -170,32 +231,53 @@ def get_relationships(
         list[Relationship]: List of Relationships formatted for Cytoscape
     """
 
-    # Dynamically construct Cypher query dependent on optional Node Labels and Relationship Types
+    # Using old school data parsing
+    try:
+        # Attempt to parse the incoming JSON data
+        parsed_data = await request.json()
+    except json.JSONDecodeError as e:
+        # Log the raw data when a JSON decode error occurs
+        print(f"JSON decode error: {e}")
+        return {"message": "JSON decode error", "error": str(e)}, 400
+
+    types = parsed_data["types"] if "types" in parsed_data else []
+    labels = parsed_data["labels"] if "labels" in parsed_data else []
+    creds = Neo4jCredentials(**parsed_data["creds"])
+
+    # Dynamically construct Cypher query dependent on optional Node Labels and Relationship Types.
+
+    # TODO: Do this is in a less confusing manner
+
     query = f"""
-    MATCH (n)-[r]->(n2);
+    MATCH (n)-[r]->(n2)
     """
+    params = {}
 
     # Add label filtering
     if labels is not None and len(labels) > 0:
-        query += "WHERE any(label IN labels(n) WHERE label IN $labels), any(label IN labels(n2) WHERE label IN $labels)"
+        query += "\nWHERE any(label IN labels(n) WHERE label IN $labels) \nAND any(label IN labels(n2) WHERE label IN $labels)"
+        params = {"labels": labels}
         if types is not None and len(types) > 0:
-            query += ", type(r) in $types;"
+            query += "\nAND type(r) in $types"
+            params["types"] = types
 
     elif types is not None and len(types) > 0:
-        query += "WHERE type(r) in $types;"
+        query += "\nWHERE type(r) in $types"
+        params["types"] = types
 
-    query += "RETURN n, r, n2;"
+    query += "\nRETURN n, r, n2"
 
-    params = {}
-
+    # Query target db for data
     records, summary, keys = query_db(creds, query, params)
 
+    # Reformat for Cytoscape
     result = []
     for r in records:
         source_id = r.values()[0]._element_id
         rid = r.values()[1]._element_id
         target_id = r.values()[2]._element_id
         r_label = r.data()["r"][1]
+
         result.append(
             {
                 "data": {
@@ -203,11 +285,12 @@ def get_relationships(
                     "target": target_id,
                     "id": rid,
                     "label": r_label,
-                    "relationship_data": r.data(),
+                    "neo4j_data": r.data(),
                 }
             }
         )
 
+    # Debug return results
     logger.debug(f"{len(result)} results found")
     if len(result) > 0:
         logger.debug(f"First result: {result[0]}")
